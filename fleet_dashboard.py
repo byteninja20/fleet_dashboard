@@ -217,21 +217,23 @@ def style_table(view_df: pd.DataFrame) -> pd.DataFrame:
 
 
 def main():
-    st.title("\U0001f69a Fleet Collection Dashboard")
+    st.title("🚚 Fleet Collection Dashboard")
 
-   if "postgres" not in st.secrets:
-    st.error(
-        "No database connected yet. Add the [postgres] credentials "
-        "in Streamlit Cloud → Settings → Secrets."
-    )
-    return
+    if "postgres" not in st.secrets:
+        st.error(
+            "No database connected yet. Add the [postgres] credentials "
+            "in Streamlit Cloud → Settings → Secrets."
+        )
+        return
 
     engine = get_engine()
 
-    with st.expander("\U0001f4e4 Upload new / updated daily data (CSV)"):
+    with st.expander("📤 Upload new / updated daily data (CSV)"):
         uploaded = st.file_uploader("Upload CSV file", type=["csv"])
+
         if uploaded is not None:
             df, error = parse_csv(uploaded)
+
             if error:
                 st.error(error)
             else:
