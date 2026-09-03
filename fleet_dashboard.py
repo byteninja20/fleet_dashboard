@@ -9,7 +9,13 @@ Setup required (one-time):
 1. Create a free Postgres database at https://supabase.com (or any Postgres host).
 2. Get its connection string (looks like: postgresql://user:pass@host:5432/dbname).
 3. In Streamlit Cloud: App settings -> Secrets -> add:
-       DB_URL = "postgresql://user:pass@host:5432/dbname"
+
+   [postgres]
+   host = "your-host"
+   port = 5432
+   database = "postgres"
+   user = "postgres"
+   password = "your-password"
 4. Redeploy. The app will create its table automatically on first run.
 
 Run locally with:
@@ -58,8 +64,19 @@ NUMERIC_DB_COLUMNS = [
 
 @st.cache_resource
 def get_engine():
-    db_url = st.secrets["DB_URL"]
+    from sqlalchemy.engine import URL
+
+    db_url = URL.create(
+        "postgresql+psycopg2",
+        username=st.secrets["postgres"]["user"],
+        password=st.secrets["postgres"]["password"],
+        host=st.secrets["postgres"]["host"],
+        port=int(st.secrets["postgres"]["port"]),
+        database=st.secrets["postgres"]["database"],
+    )
+
     engine = create_engine(db_url, pool_pre_ping=True)
+
     with engine.begin() as conn:
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS fleet_data (
@@ -85,6 +102,7 @@ def get_engine():
                 UNIQUE (date, driver_name, vehicle_no)
             )
         """))
+
     return engine
 
 
@@ -201,12 +219,12 @@ def style_table(view_df: pd.DataFrame) -> pd.DataFrame:
 def main():
     st.title("\U0001f69a Fleet Collection Dashboard")
 
-    if "DB_URL" not in st.secrets:
-        st.error(
-            "No database connected yet. Add a `DB_URL` secret in your Streamlit Cloud "
-            "app settings (Settings \u2192 Secrets) pointing to your Postgres database."
-        )
-        return
+   if "postgres" not in st.secrets:
+    st.error(
+        "No database connected yet. Add the [postgres] credentials "
+        "in Streamlit Cloud → Settings → Secrets."
+    )
+    return
 
     engine = get_engine()
 
