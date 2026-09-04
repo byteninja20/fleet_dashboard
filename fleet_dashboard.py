@@ -224,6 +224,94 @@ def style_table(view_df: pd.DataFrame) -> pd.DataFrame:
     return out.fillna("")
 
 
+@st.cache_data(ttl=30)
+def load_vehicle_numbers(_engine):
+    with _engine.begin() as conn:
+        result = conn.execute(text("""
+            SELECT DISTINCT vehicle_no FROM fleet_data
+            WHERE vehicle_no IS NOT NULL AND vehicle_no <> ''
+            ORDER BY vehicle_no
+        """))
+        return [r[0] for r in result]
+
+
+@st.cache_data(ttl=30)
+def load_available_months(_engine):
+    with _engine.begin() as conn:
+        result = conn.execute(text("""
+            SELECT DISTINCT date_trunc('month', date)::date AS month
+            FROM fleet_data
+            ORDER BY month
+        """))
+        return [r[0] for r in result]
+
+
+@st.cache_data(ttl=30)
+def load_vehicle_month_report(_engine, vehicle_no, month_start):
+    with _engine.begin() as conn:
+        result = conn.execute(
+            text("""
+                SELECT
+                    date,
+                    COALESCE(net_earning, 0) + COALESCE(mg_amount, 0) AS income,
+                    COALESCE(toll, 0) + COALESCE(other_expense, 0) AS expenses
+                FROM fleet_data
+                WHERE vehicle_no = :vehicle_no
+                  AND date_trunc('month', date) = :month_start
+                ORDER BY date
+            """),
+            {"vehicle_no": vehicle_no, "month_start": month_start},
+        )
+        rows = [dict(r._mapping) for r in result]
+    return pd.DataFrame(rows)
+
+
+def render_vehicle_monthly_report(engine):
+    vehicles = load_vehicle_numbers(engine)
+    months = load_available_months(engine)
+
+    if not vehicles or not months:
+        st.info("No data yet. Upload a CSV first.")
+        return
+
+    col_month, col_vehicle = st.columns(2)
+
+    with col_month:
+        month_labels = [pd.Timestamp(m).strftime("%B %Y") for m in months]
+        selected_month_label = st.selectbox("Select month", options=month_labels, index=len(month_labels) - 1)
+        selected_month = months[month_labels.index(selected_month_label)]
+
+    with col_vehicle:
+        selected_vehicle = st.selectbox("Select vehicle number", options=vehicles)
+
+    report_df = load_vehicle_month_report(engine, selected_vehicle, selected_month)
+
+    if report_df.empty:
+        st.warning(f"No records for {selected_vehicle} in {selected_month_label}.")
+        return
+
+    display_df = report_df.copy()
+    display_df["date"] = pd.to_datetime(display_df["date"]).dt.strftime("%d/%m/%Y")
+    display_df = display_df.rename(columns={"date": "Date", "income": "Income", "expenses": "Expenses"})
+    display_df["Net"] = display_df["Income"] - display_df["Expenses"]
+
+    total_income = report_df["income"].sum()
+    total_expenses = report_df["expenses"].sum()
+    total_net = total_income - total_expenses
+
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Total Income", f"\u20b9{total_income:,.0f}")
+    col2.metric("Total Expenses", f"\u20b9{total_expenses:,.0f}")
+    col3.metric("Net", f"\u20b9{total_net:,.0f}")
+
+    styled = display_df.copy()
+    for col in ["Income", "Expenses", "Net"]:
+        styled[col] = styled[col].apply(lambda v: f"\u20b9{v:,.0f}")
+
+    st.dataframe(styled, use_container_width=True, hide_index=True)
+    st.caption(f"{len(display_df)} day(s) with data for {selected_vehicle} in {selected_month_label}.")
+
+
 def main():
     st.title("\U0001f69a Fleet Collection Dashboard")
 
@@ -236,61 +324,70 @@ def main():
 
     engine = get_engine()
 
-    with st.expander("\U0001f4e4 Upload new / updated daily data (CSV)"):
-        uploaded = st.file_uploader("Upload CSV file", type=["csv"])
-        if uploaded is not None:
-            df, error = parse_csv(uploaded)
-            if error:
-                st.error(error)
-            else:
-                count = upsert_rows(engine, df)
-                st.success(f"Saved {count} row(s) to the database.")
-                load_all_dates.clear()
-                load_date_rows.clear()
+    tab_daily, tab_vehicle = st.tabs(["\U0001f4c5 Daily View", "\U0001f697 Vehicle Monthly Report"])
 
-    dates = load_all_dates(engine)
+    with tab_daily:
+        with st.expander("\U0001f4e4 Upload new / updated daily data (CSV)"):
+            uploaded = st.file_uploader("Upload CSV file", type=["csv"])
+            if uploaded is not None:
+                df, error = parse_csv(uploaded)
+                if error:
+                    st.error(error)
+                else:
+                    count = upsert_rows(engine, df)
+                    st.success(f"Saved {count} row(s) to the database.")
+                    load_all_dates.clear()
+                    load_date_rows.clear()
+                    load_vehicle_numbers.clear()
+                    load_available_months.clear()
+                    load_vehicle_month_report.clear()
 
-    if not dates:
-        st.info("No data yet. Upload a CSV above to get started.")
-        return
+        dates = load_all_dates(engine)
 
-    date_labels = [pd.Timestamp(d).strftime("%d/%m/%Y") for d in dates]
+        if not dates:
+            st.info("No data yet. Upload a CSV above to get started.")
+            return
 
-    if "date_idx" not in st.session_state:
-        st.session_state.date_idx = len(dates) - 1
+        date_labels = [pd.Timestamp(d).strftime("%d/%m/%Y") for d in dates]
 
-    st.session_state.date_idx = max(0, min(st.session_state.date_idx, len(dates) - 1))
+        if "date_idx" not in st.session_state:
+            st.session_state.date_idx = len(dates) - 1
 
-    col_prev, col_current, col_next = st.columns([1, 3, 1])
+        st.session_state.date_idx = max(0, min(st.session_state.date_idx, len(dates) - 1))
 
-    with col_prev:
-        if st.button("\u25c0 Previous", use_container_width=True, disabled=st.session_state.date_idx == 0):
-            st.session_state.date_idx -= 1
+        col_prev, col_current, col_next = st.columns([1, 3, 1])
 
-    with col_next:
-        if st.button("Next \u25b6", use_container_width=True, disabled=st.session_state.date_idx == len(dates) - 1):
-            st.session_state.date_idx += 1
+        with col_prev:
+            if st.button("\u25c0 Previous", use_container_width=True, disabled=st.session_state.date_idx == 0):
+                st.session_state.date_idx -= 1
 
-    with col_current:
-        selected_label = st.selectbox(
-            "Tap to jump to a specific date",
-            options=date_labels,
-            index=st.session_state.date_idx,
-            label_visibility="collapsed",
-        )
-        st.session_state.date_idx = date_labels.index(selected_label)
+        with col_next:
+            if st.button("Next \u25b6", use_container_width=True, disabled=st.session_state.date_idx == len(dates) - 1):
+                st.session_state.date_idx += 1
 
-    selected_date = dates[st.session_state.date_idx]
-    st.subheader(f"\U0001f4c5 {pd.Timestamp(selected_date).strftime('%d/%m/%Y')}")
+        with col_current:
+            selected_label = st.selectbox(
+                "Tap to jump to a specific date",
+                options=date_labels,
+                index=st.session_state.date_idx,
+                label_visibility="collapsed",
+            )
+            st.session_state.date_idx = date_labels.index(selected_label)
 
-    day_df = load_date_rows(engine, selected_date)
+        selected_date = dates[st.session_state.date_idx]
+        st.subheader(f"\U0001f4c5 {pd.Timestamp(selected_date).strftime('%d/%m/%Y')}")
 
-    if day_df.empty:
-        st.warning("No records found for this date.")
-    else:
-        clean = style_table(day_df)
-        st.dataframe(clean, use_container_width=True, hide_index=True)
-        st.caption(f"{len(clean)} record(s) for this date.")
+        day_df = load_date_rows(engine, selected_date)
+
+        if day_df.empty:
+            st.warning("No records found for this date.")
+        else:
+            clean = style_table(day_df)
+            st.dataframe(clean, use_container_width=True, hide_index=True)
+            st.caption(f"{len(clean)} record(s) for this date.")
+
+    with tab_vehicle:
+        render_vehicle_monthly_report(engine)
 
 
 if __name__ == "__main__":
