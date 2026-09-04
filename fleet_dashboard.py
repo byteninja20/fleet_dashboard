@@ -60,6 +60,9 @@ NUMERIC_DB_COLUMNS = [
 def get_engine():
     db_url = st.secrets["DB_URL"]
     engine = create_engine(db_url, pool_pre_ping=True)
+
+    # Each statement runs in its own transaction, so a failure in one
+    # (e.g. the index) can never roll back an earlier one (e.g. the table).
     with engine.begin() as conn:
         conn.execute(text("""
             CREATE TABLE IF NOT EXISTS fleet_data (
@@ -81,10 +84,27 @@ def get_engine():
                 mg_yes_no TEXT,
                 toll NUMERIC,
                 other_expense NUMERIC,
-                remarks TEXT,
-                UNIQUE (date, driver_name, vehicle_no)
+                remarks TEXT
             )
         """))
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                ALTER TABLE fleet_data DROP CONSTRAINT IF EXISTS fleet_data_date_driver_name_vehicle_no_key
+            """))
+    except Exception:
+        pass  # constraint didn't exist under that name; safe to ignore
+
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("""
+                CREATE UNIQUE INDEX IF NOT EXISTS fleet_data_unique_row
+                ON fleet_data (date, COALESCE(driver_name, ''), COALESCE(vehicle_no, ''), COALESCE(porter_id, ''))
+            """))
+    except Exception:
+        pass  # likely pre-existing duplicate rows; table still usable, dedup index just won't apply yet
+
     return engine
 
 
@@ -123,7 +143,7 @@ def upsert_rows(engine, df: pd.DataFrame):
             :net_earning, :cash_collected, :online_payment, :wallet_app, :total_collection,
             :withdrawal, :mg_amount, :mg_yes_no, :toll, :other_expense, :remarks
         )
-        ON CONFLICT (date, driver_name, vehicle_no)
+        ON CONFLICT (date, COALESCE(driver_name, ''), COALESCE(vehicle_no, ''), COALESCE(porter_id, ''))
         DO UPDATE SET
             delhivery_id = EXCLUDED.delhivery_id,
             porter_id = EXCLUDED.porter_id,
