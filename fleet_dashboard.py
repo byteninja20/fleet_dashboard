@@ -147,10 +147,16 @@ def upsert_rows(engine, df: pd.DataFrame):
         row = {db_col: r.get(csv_col) for db_col, csv_col in COLUMN_MAP.items()}
         for num_col in NUMERIC_DB_COLUMNS:
             val = row.get(num_col)
-            row[num_col] = clean_numeric(pd.Series([val])).iloc[0] if pd.notna(val) else None
+            if pd.notna(val):
+                cleaned = clean_numeric(pd.Series([val])).iloc[0]
+                row[num_col] = float(cleaned) if pd.notna(cleaned) else None
+            else:
+                row[num_col] = None
         for k, v in row.items():
             if pd.isna(v):
                 row[k] = None
+            elif hasattr(v, "item"):  # convert any remaining numpy scalar types to native Python
+                row[k] = v.item()
         rows.append(row)
 
     with engine.begin() as conn:
